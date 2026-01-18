@@ -11,7 +11,7 @@ library(visdat)
 library(pROC)
 
 #reading the datest
-diabetes <- read.csv("../PRIMA/diabetes_data.csv", header=T)
+diabetes <- read.csv("../PIMA-dataset/diabetes_data.csv", header=T)
 
 #initial inspection of the data
 head(diabetes) 
