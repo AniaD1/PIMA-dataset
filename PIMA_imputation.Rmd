@@ -64,7 +64,7 @@ print(na_counts)
 
 As expected, there are no missing values in the dataset. However, the dataset summary shows that some variables have zeros as minimum values. In some cases, such as BloodPressure or Insuline, this is biologically impossible. To investigate this issue further, the distribution of the data will be checked.
 
-```{r hist, echo=FALSE}
+```{r hist, echo=TRUE}
 hist(diabetes)
 ```
 
@@ -82,7 +82,7 @@ diabetes_exploration_total_n <- as.data.frame(colSums(diabetes_exploration[c(2:7
 colnames(diabetes_exploration_total_n) <-"Count"
 ```
 
-```{r zeros, echo=FALSE }
+```{r zeros, echo=TRUE}
 number_zero <- ggplot(data=diabetes_exploration_total_n,
                       aes(y=Count,x=rownames(diabetes_exploration_total_n), fill =
                             rownames(diabetes_exploration_total_n))) + 
@@ -169,7 +169,7 @@ dim(testing_dataset)
 
 The datasets will be imputed separately using the MICE algorithm, and the imputation results will be visualized using bwplot and densityplot.
 
-```{r imput, results="hide",  echo=FALSE}
+```{r imput, results="hide",  echo=TRUE}
 imp_train <- mice(training_dataset, m = 20, method = "pmm",seed = 123)
 imp_test <- mice(testing_dataset,m = 20,method = "pmm",seed = 123)
 ```
