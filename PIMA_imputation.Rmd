@@ -1,0 +1,236 @@
+---
+title: 'Pima Diabetes Dataset: Missingness Exploration and Imputation'
+output:
+  pdf_document: default
+  html_document: default
+date: "2026-01-17"
+editor_options:
+  markdown:
+    wrap: 72
+---
+<style>
+body {
+text-align: justify}
+
+p.caption {
+  font-size: 1.5em;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Analysis context
+This dataset was originally obtained from the National Institute of Diabetes and Digestive and Kidney Diseases [1]. The dataset contains the medical information of females who, at the time of inclusion in the study, were at least 21 years old and of Pima Indian heritage. The dataset's initial objective was to predict, based on certain diagnostic measurements included in the dataset (number of pregnancies the patient, BMI, insulin level, age etc.), whether or not a patient had diabetes.
+
+As the dataset contains many values equal to zero (which, in some cases, is biologically impossible), the initial assumption of the analysis was that these values should be assigned as missing. Therefore, the aim of this analysis was to investigate this possibility, examine the missingness patterns, select an imputation method and perform predictions on the data.
+
+[1] *Smith, J.W., Everhart, J.E., Dickson, W.C., Knowler, W.C., & Johannes, R.S. (1988). Using the ADAP learning algorithm to forecast the onset of diabetes mellitus. In Proceedings of the Symposium on Computer Applications and Medical Care (pp. 261--265). IEEE Computer Society Press.*
+
+## Required libraries
+
+```{r, libraries, message=FALSE, warning=FALSE}
+library(randomForest) 
+library(naniar) 
+library(mice) 
+library(ggplot2)
+library(ggpubr) 
+library(rstatix) 
+library(Hmisc) 
+library(tidyverse)
+library(patchwork) 
+library(visdat)
+library(pROC)
+```
+
+## Reading of the dataset and initial inspection
+```{r reading the datest}
+diabetes <- read.csv("../PRIMA/diabetes_data.csv",header=T)
+
+head(diabetes) 
+str(diabetes) 
+```
+The dataset contains 768 observations and nine variables, all of which are integers or numeric. The *Outcome* variable should be a factor, so a transformation will be performed. Next, the dataset will be checked for any missing values.
+
+```{r reading2 the datest}
+diabetes$Outcome<- as.factor(diabetes$Outcome)
+
+summary(diabetes)
+na_counts <- colSums(is.na(diabetes)) 
+print(na_counts)
+```
+
+As expected, there are no missing values in the dataset. However, the dataset summary shows that some variables have zeros as minimum values. In some cases, such as BloodPressure or Insuline, this is biologically impossible. To investigate this issue further, the distribution of the data will be checked.
+
+```{r hist, echo=FALSE}
+hist(diabetes)
+```
+
+Some of the variables (*Glucose*, *BloodPressure*, *SkinThickness*,
+*DiabetesPedigreeFunction*, *Insulin*, and *BMI*) contain many values equal to
+0, which is biologically implausible and likely indicates that these
+measurements were not collected. In the first step, a deeper analysis of
+the impact of these zero values on the data structure will be performed. From this analysis *Outcome* and *Pregnecies* variables were excluded as zero values in those columns are expected.
+
+
+## Data exploration
+```{r further exploration}
+diabetes_exploration<-diabetes 
+diabetes_exploration_total_n <- as.data.frame(colSums(diabetes_exploration[c(2:7)]==0))
+colnames(diabetes_exploration_total_n) <-"Count"
+```
+
+```{r zeros, echo=FALSE }
+number_zero <- ggplot(data=diabetes_exploration_total_n,
+                      aes(y=Count,x=rownames(diabetes_exploration_total_n), fill =
+                            rownames(diabetes_exploration_total_n))) + 
+                      geom_bar(stat ="identity") +
+                      geom_text(aes(label = Count), vjust = -0.5) +
+                      scale_fill_manual(values=c("lightblue", "skyblue4", "deepskyblue4","dodgerblue4", "skyblue3", "skyblue2"))+ 
+                      scale_y_continuous(limits = c(0, 410))+
+                      theme_minimal() +
+                      theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+                      labs(title="Visualistion of amout of zeros for numeric variable",
+                           fill="Variables",x="") 
+print(number_zero)
+```
+
+The highest number of zeros is present in *Insulin* and *SkinTickness* columns.
+
+As mentioned, these values should probably be recorded as missing. To further analyse these values, zeros will be replaced with NAs, which allows the use of visualization techniques to explore missingness patterns. This replacement will be performed for all columns except *Pregnancies* and *Outcome*.
+
+## Missingness evaluation
+```{r miss_imp}
+diabetes_imp <- diabetes %>% mutate(across(2:8, ~ na_if(.x, 0)))
+```
+
+
+```{r miss_graph, echo=TRUE, hight=10}
+vis_miss_p<-vis_miss(diabetes_imp, cluster = T, sort_miss = T, show_perc = T, show_perc_col = T)
+vis_miss_p +  # move axis below panel
+  theme(axis.text.x = element_text(angle = 45, hjust = 0,vjust=0.1),
+        plot.margin = margin(t = 1, r = 20, b = 10, l = 5))
+```
+
+It is visible that some missing values co-occur across variables,
+suggesting that the data may not be missing at random. To further
+explore missingness patterns, the gg_miss_upset function will be used.
+
+```{r miss_upset,echo=FALSE,warning=FALSE}
+gg_miss_upset(diabetes_imp,main.bar.color = "deepskyblue4",
+sets.bar.color = "deepskyblue4")
+
+```
+
+The plot shows that some values tend to co-occur. The most frequent pair (192 observations) is SkinTickness and Insulin NAs, which are in the same row. This implies that the missing values are not missing completely at random. This has implications for the selection of the imputation method. The themcar_test function will be used to confirm that the missingness is not random.
+
+```{r mcar_test}
+mcar_test(diabetes_imp[2:8]) 
+
+```
+
+The very low p-value of this test indicates that the MCAR (missing completely at random) assumption has been rejected; therefore, missingness may be MAR (missing at random) or MNAR (missing not at random). Together with the high proportion of missing values, this suggests that simple imputation methods, such as mean or median imputation, are not appropriate. 
+
+The next step will assess the plausibility of a MAR mechanism using logistic regression. Missingness indicators for each variable will be modelled sequentially as a function of the observed predictors.
+
+```{r MAR glm}
+vars <- c("Insulin", "Glucose","BMI","SkinThickness","BloodPressure")
+
+pvals <- sapply(vars, function(v) { 
+  preds <- setdiff(c("Insulin","Glucose","BMI","SkinThickness","BloodPressure"), v) 
+  f <-as.formula(paste0("is.na(", v, ") ~", paste(preds, collapse = " + ")))
+  fit <- glm(f, data = diabetes_imp, family = binomial)
+  coef(summary(fit))[-1, 4] })
+
+print(pvals)
+```
+
+*glm.fit: algorithm did not converge* warning often occurs when the model attempts to fit a logistic regression and experiences perfect separation, whereby a predictor variable is able to perfectly categorise the response variable as 0 or 1. This is quasi-complete separation and makes it impossible to reliably estimate Wald p-values. In this case, we iterate the tested variables, assigning them as the response variable in the model and using the remaining variables as predictors. For these results, this means that based on the predictor, we can perfectly predict whether or not there will be a missing value in the dependent variable.
+
+This indicates a very strong co-occurrence of missingness, suggesting a missing-at-random (MAR) mechanism, where missingness depends on other observed variables but not on the missing value itself, rather than missing completely at random (MCAR), where missingness is purely random and unrelated to any data, or missing not at random (MNAR), where missingness depends on the unobserved value. Given the plausibility of MAR, multiple imputation using MICE will be performed.
+
+As the next step involves predictive modeling, the data will first be split into training and testing sets.
+
+## Data imputation
+
+```{r split, message=FALSE}
+set.seed(123) 
+n <- nrow(diabetes_imp) 
+train_idx <- sample(seq_len(n),size = 0.7 * n)
+
+training_dataset <- diabetes_imp[train_idx, ]
+dim(training_dataset)
+
+testing_dataset <- diabetes_imp[-train_idx, ] 
+dim(testing_dataset)
+```
+
+The datasets will be imputed separately using the MICE algorithm, and the imputation results will be visualized using bwplot and densityplot.
+
+```{r imput, results="hide",  echo=FALSE}
+imp_train <- mice(training_dataset, m = 20, method = "pmm",seed = 123)
+imp_test <- mice(testing_dataset,m = 20,method = "pmm",seed = 123)
+```
+
+
+```{r imptrain, fig.cap="Diagnostics plot for train dataset imputation ", fig.topcaption=TRUE}
+bwplot(imp_train) 
+```
+```{r imptrain2}
+densityplot(imp_train)
+```
+
+```{r imptest, fig.cap="Diagnostics plots for test dataset imputation",fig.topcaption=TRUE}
+bwplot(imp_test) 
+```
+```{r imptest2}
+densityplot(imp_test)
+```
+
+The diagnostic plots of the imputed data for both the training and testing datasets showed that the distributions of the imputed data matched the original ones well, with the exception of *Glucose* and *BMI* (visible on the box-whisker plots). This is due to the low number of missing data (five for *Glucose* and eleven for *BMI*) and the high variability of the imputed data related to this number. As only one glucose value was imputed in the testing dataset, a density plot for this variable was not generated.
+
+## Models generation
+Next, two predictive models will be evaluated: a logistic regression model and a random forest model. For each method, the models will be fitted separately within each imputed dataset. Predictions will then be generated using the imputed test datasets and the predicted probabilities will be averaged across the imputations to produce a pooled estimate.
+
+```{r glm}
+fit_glm <- with(imp_train,
+glm(Outcome~Pregnancies+Glucose+BloodPressure+SkinThickness+Insulin+BMI+DiabetesPedigreeFunction+Age,family = binomial))
+
+completed_train  <- lapply(1:imp_train$m, function(i) complete(imp_train, i))
+
+glm_preds <-sapply(1:imp_train$m, function(i){ 
+  predict(fit_glm$analyses[[i]],newdata = complete(imp_test, i),type = "response" )})
+
+final_pred_glm <- rowMeans(glm_preds)
+```
+
+```{r RF}
+rf_preds <- sapply(1:imp_train$m, function(i) { 
+  train_complete <-complete(imp_train, i) 
+  test_complete <- complete(imp_test, i) 
+  rf <-randomForest(Outcome ~
+Pregnancies+Glucose+BloodPressure+SkinThickness+Insulin+BMI+DiabetesPedigreeFunction+Age,
+data = train_complete, ntree = 500)
+
+predict(rf, newdata = test_complete, type = "prob")[,2] })
+
+final_pred_rf <- rowMeans(rf_preds)
+```
+To evaluate predictive performance, the AUC will be calculated and ROC curves will be generated.
+
+```{r rock, message=FALSE}
+roc_obj <- roc(testing_dataset$Outcome, final_pred_glm) 
+auc(roc_obj)
+plot(roc_obj, col = "blue", main = "GLM ROC Curve", print.auc = TRUE)
+
+roc_rf <- roc(testing_dataset$Outcome, final_pred_rf) 
+auc(roc_rf)
+plot(roc_rf, col = "blue", main = "RF ROC Curve", print.auc = TRUE)
+```
+
+As shown both modles were able to accuretelly predict the *Outcome* data based on the imputed data, which is indicated by high values of AUC for both models.
+
+## Summary
+This analysis uses multiple imputation to handle missing data, reducing bias from complete-case analysis and enabling fair comparison of predictive models.
